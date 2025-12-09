@@ -1,0 +1,251 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+// 左旋转函数
+#define LEFT_ROTATE(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+
+// SM3常量定义
+static const uint32_t T[64] = {
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A
+};
+
+// 初始哈希值
+static const uint32_t IV[8] = {
+    0x7380166F, 0x4914B2B9, 0x172442D7, 0xDA8A0600,
+    0xA96F30BC, 0x163138AA, 0xE38DEE4D, 0xB0FB0E4E
+};
+
+// 布尔函数
+#define FF0(x, y, z) ((x) ^ (y) ^ (z))
+#define FF1(x, y, z) (((x) & (y)) | ((x) & (z)) | ((y) & (z)))
+#define GG0(x, y, z) ((x) ^ (y) ^ (z))
+#define GG1(x, y, z) (((x) & (y)) | ((~(x)) & (z)))
+
+// 置换函数
+#define P0(x) ((x) ^ LEFT_ROTATE((x), 9) ^ LEFT_ROTATE((x), 17))
+#define P1(x) ((x) ^ LEFT_ROTATE((x), 15) ^ LEFT_ROTATE((x), 23))
+
+// SM3上下文结构体
+typedef struct {
+    uint32_t state[8];
+    uint64_t count;
+    uint8_t buffer[64];
+} SM3_CTX;
+
+// 函数声明
+void sm3_init(SM3_CTX* ctx);
+void sm3_update(SM3_CTX* ctx, const uint8_t* data, size_t len);
+void sm3_final(SM3_CTX* ctx, uint8_t digest[32]);
+void sm3_string(const char* str, uint8_t digest[32]);
+void sm3_file(const char* filename, uint8_t digest[32]);
+// 压缩函数
+static void sm3_compress(uint32_t state[8], const uint8_t block[64]) {
+    uint32_t W[68];
+    uint32_t W1[64];
+    uint32_t A, B, C, D, E, F, G, H;
+    uint32_t SS1, SS2, TT1, TT2;
+    int j;
+
+    // 消息扩展
+    for (j = 0; j < 16; j++) {
+        W[j] = ((uint32_t)block[j * 4] << 24) |
+               ((uint32_t)block[j * 4 + 1] << 16) |
+               ((uint32_t)block[j * 4 + 2] << 8) |
+               ((uint32_t)block[j * 4 + 3]);
+    }
+
+    for (j = 16; j < 68; j++) {
+        W[j] = P1(W[j - 16] ^ W[j - 9] ^ LEFT_ROTATE(W[j - 3], 15)) ^
+               LEFT_ROTATE(W[j - 13], 7) ^ W[j - 6];
+    }
+
+    for (j = 0; j < 64; j++) {
+        W1[j] = W[j] ^ W[j + 4];
+    }
+
+    // 压缩
+    A = state[0];
+    B = state[1];
+    C = state[2];
+    D = state[3];
+    E = state[4];
+    F = state[5];
+    G = state[6];
+    H = state[7];
+
+    for (j = 0; j < 64; j++) {
+        uint32_t T_j = (j < 16) ? 0x79CC4519 : 0x7A879D8A;
+
+        SS1 = LEFT_ROTATE((LEFT_ROTATE(A, 12) + E + LEFT_ROTATE(T_j, j)), 7);
+        SS2 = SS1 ^ LEFT_ROTATE(A, 12);
+
+        if (j < 16) {
+            TT1 = FF0(A, B, C) + D + SS2 + W1[j];
+            TT2 = GG0(E, F, G) + H + SS1 + W[j];
+        } else {
+            TT1 = FF1(A, B, C) + D + SS2 + W1[j];
+            TT2 = GG1(E, F, G) + H + SS1 + W[j];
+        }
+
+        D = C;
+        C = LEFT_ROTATE(B, 9);
+        B = A;
+        A = TT1;
+        H = G;
+        G = LEFT_ROTATE(F, 19);
+        F = E;
+        E = P0(TT2);
+    }
+
+    state[0] ^= A;
+    state[1] ^= B;
+    state[2] ^= C;
+    state[3] ^= D;
+    state[4] ^= E;
+    state[5] ^= F;
+    state[6] ^= G;
+    state[7] ^= H;
+}
+
+// SM3初始化
+void sm3_init(SM3_CTX* ctx) {
+    memcpy(ctx->state, IV, sizeof(IV));
+    ctx->count = 0;
+    memset(ctx->buffer, 0, sizeof(ctx->buffer));
+}
+
+// SM3更新
+void sm3_update(SM3_CTX* ctx, const uint8_t* data, size_t len) {
+    size_t offset = ctx->count % 64;
+    size_t available = 64 - offset;
+
+    ctx->count += len;
+
+    if (len < available) {
+        memcpy(ctx->buffer + offset, data, len);
+        return;
+    }
+
+    memcpy(ctx->buffer + offset, data, available);
+    sm3_compress(ctx->state, ctx->buffer);
+
+    data += available;
+    len -= available;
+
+    while (len >= 64) {
+        sm3_compress(ctx->state, data);
+        data += 64;
+        len -= 64;
+    }
+
+    if (len > 0) {
+        memcpy(ctx->buffer, data, len);
+    }
+}
+// SM3最终计算
+void sm3_final(SM3_CTX* ctx, uint8_t digest[32]) {
+    size_t offset = ctx->count % 64;
+    size_t pad_len;
+
+    if (offset < 56) {
+        pad_len = 56 - offset;
+    } else {
+        pad_len = 120 - offset;
+    }
+
+    uint8_t pad[128];
+    memset(pad, 0, sizeof(pad));
+    pad[0] = 0x80;
+
+    uint64_t bit_count = ctx->count * 8;
+    for (int i = 0; i < 8; i++) {
+        pad[pad_len + i] = (bit_count >> (56 - 8 * i)) & 0xFF;
+    }
+
+    sm3_update(ctx, pad, pad_len + 8);
+
+    for (int i = 0; i < 8; i++) {
+        digest[i * 4] = (ctx->state[i] >> 24) & 0xFF;
+        digest[i * 4 + 1] = (ctx->state[i] >> 16) & 0xFF;
+        digest[i * 4 + 2] = (ctx->state[i] >> 8) & 0xFF;
+        digest[i * 4 + 3] = ctx->state[i] & 0xFF;
+    }
+}
+
+// 字符串哈希计算
+void sm3_string(const char* str, uint8_t digest[32]) {
+    SM3_CTX ctx;
+    sm3_init(&ctx);
+    sm3_update(&ctx, (uint8_t*)str, strlen(str));
+    sm3_final(&ctx, digest);
+}
+
+// 文件哈希计算
+void sm3_file(const char* filename, uint8_t digest[32]) {
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        printf("无法打开文件: %s\n", filename);
+        return;
+    }
+
+    SM3_CTX ctx;
+    sm3_init(&ctx);
+
+    uint8_t buffer[1024];
+    size_t bytes_read;
+    while ((bytes_read = fread(buffer, 1, sizeof(buffer), file)) > 0) {
+        sm3_update(&ctx, buffer, bytes_read);
+    }
+
+    sm3_final(&ctx, digest);
+    fclose(file);
+}
+
+// 主函数 - 命令行参数版本
+int main(int argc, char* argv[]) {
+    if (argc == 3) {
+        if (strcmp(argv[1], "-s") == 0) {
+            uint8_t digest[32];
+            sm3_string(argv[2], digest);
+            for (int i = 0; i < 32; i++) printf("%02x", digest[i]);
+            printf("\n");
+        } else if (strcmp(argv[1], "-f") == 0) {
+            uint8_t digest[32];
+            sm3_file(argv[2], digest);
+            for (int i = 0; i < 32; i++) printf("%02x", digest[i]);
+            printf("\n");
+        } else {
+            printf("错误: 未知参数 %s\n", argv[1]);
+            printf("使用方法:\n");
+            printf("  %s -s \"字符串\"   # 计算字符串的SM3哈希\n", argv[0]);
+            printf("  %s -f 文件名      # 计算文件的SM3哈希\n", argv[0]);
+            return 1;
+        }
+    } else {
+        printf("SM3 哈希算法工具\n");
+        printf("使用方法:\n");
+        printf("  %s -s \"字符串\"   # 计算字符串的SM3哈希\n", argv[0]);
+        printf("  %s -f 文件名      # 计算文件的SM3哈希\n", argv[0]);
+        return 1;
+    }
+    
+    return 0;
+}
+
