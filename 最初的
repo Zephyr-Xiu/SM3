@@ -1,0 +1,255 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+// 经过验证的SM3实现
+typedef struct {
+    uint32_t digest[8];
+    uint64_t nblocks;
+    unsigned char block[64];
+    int num;
+} sm3_ctx_t;
+
+#define ROTL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+
+static const uint32_t T[64] = {
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A
+};
+
+static const uint32_t IV[8] = {
+    0x7380166F, 0x4914B2B9, 0x172442D7, 0xDA8A0600,
+    0xA96F30BC, 0x163138AA, 0xE38DEE4D, 0xB0FB0E4E
+};
+
+static uint32_t FF(uint32_t X, uint32_t Y, uint32_t Z, int j) {
+    return (j < 16) ? (X ^ Y ^ Z) : ((X & Y) | (X & Z) | (Y & Z));
+}
+
+static uint32_t GG(uint32_t X, uint32_t Y, uint32_t Z, int j) {
+    return (j < 16) ? (X ^ Y ^ Z) : ((X & Y) | ((~X) & Z));
+}
+
+static uint32_t P0(uint32_t X) {
+    return X ^ ROTL(X, 9) ^ ROTL(X, 17);
+}
+
+static uint32_t P1(uint32_t X) {
+    return X ^ ROTL(X, 15) ^ ROTL(X, 23);
+}
+
+static void sm3_compress(uint32_t digest[8], const unsigned char block[64]) {
+    uint32_t W[68];
+    uint32_t W1[64];
+    uint32_t A, B, C, D, E, F, G, H;
+    uint32_t SS1, SS2, TT1, TT2;
+    int j;
+
+    // 消息扩展
+    for (j = 0; j < 16; j++) {
+        W[j] = ((uint32_t)block[j * 4] << 24) |
+               ((uint32_t)block[j * 4 + 1] << 16) |
+               ((uint32_t)block[j * 4 + 2] << 8) |
+               ((uint32_t)block[j * 4 + 3]);
+    }
+
+    for (j = 16; j < 68; j++) {
+        W[j] = P1(W[j - 16] ^ W[j - 9] ^ ROTL(W[j - 3], 15)) ^
+               ROTL(W[j - 13], 7) ^ W[j - 6];
+    }
+
+    for (j = 0; j < 64; j++) {
+        W1[j] = W[j] ^ W[j + 4];
+    }
+
+    // 压缩函数
+    A = digest[0];
+    B = digest[1];
+    C = digest[2];
+    D = digest[3];
+    E = digest[4];
+    F = digest[5];
+    G = digest[6];
+    H = digest[7];
+
+    for (j = 0; j < 64; j++) {
+        SS1 = ROTL(ROTL(A, 12) + E + ROTL(T[j], j), 7);
+        SS2 = SS1 ^ ROTL(A, 12);
+        TT1 = FF(A, B, C, j) + D + SS2 + W1[j];
+        TT2 = GG(E, F, G, j) + H + SS1 + W[j];
+        D = C;
+        C = ROTL(B, 9);
+        B = A;
+        A = TT1;
+        H = G;
+        G = ROTL(F, 19);
+        F = E;
+        E = P0(TT2);
+    }
+
+    digest[0] ^= A;
+    digest[1] ^= B;
+    digest[2] ^= C;
+    digest[3] ^= D;
+    digest[4] ^= E;
+    digest[5] ^= F;
+    digest[6] ^= G;
+    digest[7] ^= H;
+}
+
+void sm3_init(sm3_ctx_t* ctx) {
+    memcpy(ctx->digest, IV, sizeof(IV));
+    ctx->nblocks = 0;
+    ctx->num = 0;
+}
+
+void sm3_update(sm3_ctx_t* ctx, const unsigned char* data, size_t data_len) {
+    if (ctx->num) {
+        unsigned int left = 64 - ctx->num;
+        if (data_len < left) {
+            memcpy(ctx->block + ctx->num, data, data_len);
+            ctx->num += (int)data_len;
+            return;
+        } else {
+            memcpy(ctx->block + ctx->num, data, left);
+            sm3_compress(ctx->digest, ctx->block);
+            ctx->nblocks++;
+            data += left;
+            data_len -= left;
+        }
+    }
+    while (data_len >= 64) {
+        sm3_compress(ctx->digest, data);
+        ctx->nblocks++;
+        data += 64;
+        data_len -= 64;
+    }
+    ctx->num = (int)data_len;
+    if (data_len) {
+        memcpy(ctx->block, data, data_len);
+    }
+}
+
+void sm3_final(sm3_ctx_t* ctx, unsigned char* digest) {
+    int i;
+    uint64_t nbits = (ctx->nblocks << 9) + (ctx->num << 3);
+
+    ctx->block[ctx->num] = 0x80;
+    if (ctx->num + 9 <= 64) {
+        memset(ctx->block + ctx->num + 1, 0, 64 - ctx->num - 9);
+    } else {
+        memset(ctx->block + ctx->num + 1, 0, 64 - ctx->num - 1);
+        sm3_compress(ctx->digest, ctx->block);
+        memset(ctx->block, 0, 56);
+    }
+
+    for (i = 0; i < 8; i++) {
+        ctx->block[63 - i] = (unsigned char)((nbits >> (i * 8)) & 0xFF);
+    }
+
+    sm3_compress(ctx->digest, ctx->block);
+
+    for (i = 0; i < 8; i++) {
+        digest[i * 4] = (unsigned char)((ctx->digest[i] >> 24) & 0xFF);
+        digest[i * 4 + 1] = (unsigned char)((ctx->digest[i] >> 16) & 0xFF);
+        digest[i * 4 + 2] = (unsigned char)((ctx->digest[i] >> 8) & 0xFF);
+        digest[i * 4 + 3] = (unsigned char)(ctx->digest[i] & 0xFF);
+    }
+
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+void sm3_hash(const unsigned char* data, size_t len, unsigned char* digest) {
+    sm3_ctx_t ctx;
+    sm3_init(&ctx);
+    sm3_update(&ctx, data, len);
+    sm3_final(&ctx, digest);
+}
+
+void print_hash(const unsigned char* hash) {
+    int i;
+    for (i = 0; i < 32; i++) {
+        printf("%02x", hash[i]);
+    }
+    printf("\n");
+}
+
+// 测试函数
+int main() {
+    printf("=== 经过验证的SM3哈希算法测试 ===\n\n");
+
+    // 标准测试用例
+    struct {
+        const char* input;
+        const char* expected;
+    } tests[] = {
+        {"", "1ab21d8355cfa17f8e61194831e81a8f22bec8c728fefb747ed035eb5082aa2b"},
+        {"abc", "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0"},
+        {"abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd", 
+         "debe9ff92275b8a138604889c18e5a4d6fdb70e5387e5765293dcba39c0c5732"}
+    };
+
+    for (int i = 0; i < sizeof(tests) / sizeof(tests[0]); i++) {
+        unsigned char hash[32];
+        
+        printf("测试 %d:\n", i + 1);
+        printf("输入: \"%s\"\n", tests[i].input);
+        printf("长度: %zu 字节\n", strlen(tests[i].input));
+        printf("预期: %s\n", tests[i].expected);
+        printf("实际: ");
+        
+        sm3_hash((unsigned char*)tests[i].input, strlen(tests[i].input), hash);
+        print_hash(hash);
+        
+        // 检查结果是否正确
+        char actual[65];
+        for (int j = 0; j < 32; j++) {
+            sprintf(actual + j * 2, "%02x", hash[j]);
+        }
+        
+        if (strcmp(actual, tests[i].expected) == 0) {
+            printf("✓ 测试通过\n");
+        } else {
+            printf("✗ 测试失败\n");
+        }
+        printf("\n");
+    }
+
+    // 交互式测试
+    printf("=== 交互式测试 ===\n");
+    printf("请输入要计算SM3哈希的字符串 (输入'quit'退出):\n");
+    
+    char buffer[1024];
+    while (1) {
+        printf("> ");
+        if (fgets(buffer, sizeof(buffer), stdin) == NULL) break;
+        
+        // 移除换行符
+        size_t len = strlen(buffer);
+        if (len > 0 && buffer[len - 1] == '\n') {
+            buffer[len - 1] = '\0';
+            len--;
+        }
+        
+        if (strcmp(buffer, "quit") == 0) break;
+        
+        unsigned char hash[32];
+        sm3_hash((unsigned char*)buffer, strlen(buffer), hash);
+        
+        printf("输入: \"%s\"\n", buffer);
+        printf("长度: %zu 字节\n", strlen(buffer));
+        printf("SM3哈希: ");
+        print_hash(hash);
+        printf("\n");
+    }
+
+    return 0;
+}
