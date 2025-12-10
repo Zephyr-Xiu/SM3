@@ -1,0 +1,257 @@
+#define _CRT_SECURE_NO_WARNINGS  // 禁用安全警告
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+// 左旋转函数
+#define LEFT_ROTATE(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+
+// SM3常量定义
+static const uint32_t T[64] = {
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A
+};
+
+// 初始哈希值
+static const uint32_t IV[8] = {
+    0x7380166F, 0x4914B2B9, 0x172442D7, 0xDA8A0600,
+    0xA96F30BC, 0x163138AA, 0xE38DEE4D, 0xB0FB0E4E
+};
+
+// 布尔函数
+static uint32_t FF(uint32_t X, uint32_t Y, uint32_t Z, int j) {
+    if (j >= 0 && j <= 15) {
+        return X ^ Y ^ Z;
+    } else {
+        return (X & Y) | (X & Z) | (Y & Z);
+    }
+}
+
+static uint32_t GG(uint32_t X, uint32_t Y, uint32_t Z, int j) {
+    if (j >= 0 && j <= 15) {
+        return X ^ Y ^ Z;
+    } else {
+        return (X & Y) | ((~X) & Z);
+    }
+}
+
+// 置换函数
+static uint32_t P0(uint32_t X) {
+    return X ^ LEFT_ROTATE(X, 9) ^ LEFT_ROTATE(X, 17);
+}
+
+static uint32_t P1(uint32_t X) {
+    return X ^ LEFT_ROTATE(X, 15) ^ LEFT_ROTATE(X, 23);
+}
+
+// 消息填充
+static void sm3_padding(const uint8_t* message, uint64_t len, uint8_t* padded_msg, uint64_t* padded_len) {
+    uint64_t bit_len = len * 8;
+    uint64_t new_len = len + 1 + 8; // 原始消息 + '1' + 64位长度
+
+    // 计算需要填充的0的数量
+    uint64_t pad_zeros = (64 - (new_len % 64)) % 64;
+    *padded_len = len + 1 + pad_zeros + 8;
+
+    // 复制原始消息
+    memcpy(padded_msg, message, len);
+
+    // 添加bit '1'
+    padded_msg[len] = 0x80;
+
+    // 填充0
+    memset(padded_msg + len + 1, 0, pad_zeros);
+
+    // 添加消息长度（大端序）
+    for (int i = 0; i < 8; i++) {
+        padded_msg[*padded_len - 8 + i] = (uint8_t)((bit_len >> (56 - i * 8)) & 0xFF);
+    }
+}
+
+// 消息扩展
+static void sm3_message_expansion(const uint32_t* block, uint32_t* W, uint32_t* W1) {
+    // 将512位消息块划分为16个32位字
+    for (int i = 0; i < 16; i++) {
+        W[i] = (block[i * 4] << 24) | (block[i * 4 + 1] << 16) |
+            (block[i * 4 + 2] << 8) | (block[i * 4 + 3]);
+    }
+
+    // 扩展132个字
+    for (int j = 16; j < 68; j++) {
+        W[j] = P1(W[j - 16] ^ W[j - 9] ^ LEFT_ROTATE(W[j - 3], 15)) ^
+            LEFT_ROTATE(W[j - 13], 7) ^ W[j - 6];
+    }
+
+    for (int j = 0; j < 64; j++) {
+        W1[j] = W[j] ^ W[j + 4];
+    }
+}
+
+// 压缩函数
+static void sm3_compress(uint32_t* V, const uint32_t* block) {
+    uint32_t W[68];
+    uint32_t W1[64];
+    uint32_t A, B, C, D, E, F, G, H;
+    uint32_t SS1, SS2, TT1, TT2;
+
+    // 消息扩展
+    sm3_message_expansion(block, W, W1);
+
+    // 初始化寄存器
+    A = V[0]; B = V[1]; C = V[2]; D = V[3];
+    E = V[4]; F = V[5]; G = V[6]; H = V[7];
+
+    // 64轮迭代
+    for (int j = 0; j < 64; j++) {
+        SS1 = LEFT_ROTATE((LEFT_ROTATE(A, 12) + E + LEFT_ROTATE(T[j], j)), 7);
+        SS2 = SS1 ^ LEFT_ROTATE(A, 12);
+        TT1 = FF(A, B, C, j) + D + SS2 + W1[j];
+        TT2 = GG(E, F, G, j) + H + SS1 + W[j];
+        D = C;
+        C = LEFT_ROTATE(B, 9);
+        B = A;
+        A = TT1;
+        H = G;
+        G = LEFT_ROTATE(F, 19);
+        F = E;
+        E = P0(TT2);
+    }
+
+    // 更新哈希值
+    V[0] ^= A; V[1] ^= B; V[2] ^= C; V[3] ^= D;
+    V[4] ^= E; V[5] ^= F; V[6] ^= G; V[7] ^= H;
+}
+
+// SM3主函数
+void sm3_hash(const uint8_t* message, uint64_t len, uint8_t* hash) {
+    uint8_t* padded_msg;
+    uint64_t padded_len;
+    uint32_t V[8];
+
+    // 消息填充
+    padded_msg = (uint8_t*)malloc(len + 64 + 8); // 分配足够空间
+    if (!padded_msg) {
+        return;
+    }
+
+    sm3_padding(message, len, padded_msg, &padded_len);
+
+    // 初始化哈希值
+    memcpy(V, IV, sizeof(IV));
+
+    // 处理每个512位块
+    uint64_t blocks = padded_len / 64;
+    for (uint64_t i = 0; i < blocks; i++) {
+        sm3_compress(V, (uint32_t*)(padded_msg + i * 64));
+    }
+
+    // 输出哈希值（大端序）
+    for (int i = 0; i < 8; i++) {
+        hash[i * 4] = (uint8_t)((V[i] >> 24) & 0xFF);
+        hash[i * 4 + 1] = (uint8_t)((V[i] >> 16) & 0xFF);
+        hash[i * 4 + 2] = (uint8_t)((V[i] >> 8) & 0xFF);
+        hash[i * 4 + 3] = (uint8_t)(V[i] & 0xFF);
+    }
+
+    free(padded_msg);
+}
+
+// 打印哈希值
+void print_hash(const uint8_t* hash) {
+    for (int i = 0; i < 32; i++) {
+        printf("%02x", hash[i]);
+    }
+    printf("\n");
+}
+
+// Windows兼容的输入函数
+char* read_input_windows() {
+    char buffer[1024];
+    printf("请输入要计算SM3哈希的字符串: ");
+
+    if (fgets(buffer, sizeof(buffer), stdin) != NULL) {
+        // 移除换行符
+        size_t len = strlen(buffer);
+        if (len > 0 && buffer[len - 1] == '\n') {
+            buffer[len - 1] = '\0';
+        }
+
+        // 复制到堆内存
+        char* result = (char*)malloc(strlen(buffer) + 1);
+        if (result) {
+            strcpy(result, buffer);
+        }
+        return result;
+    }
+    return NULL;
+}
+
+// 简单菜单
+void show_menu() {
+    printf("\n=== SM3哈希算法测试程序 ===\n");
+    printf("1. 计算字符串的SM3哈希\n");
+    printf("2. 退出程序\n");
+    printf("请选择: ");
+}
+
+// 主函数 - 简化版本
+int main() {
+    int choice;
+
+    do {
+        show_menu();
+        if (scanf("%d", &choice) != 1) {
+            // 清除输入缓冲区
+            int c;
+            while ((c = getchar()) != '\n' && c != EOF);
+            continue;
+        }
+
+        // 清除输入缓冲区
+        int c;
+        while ((c = getchar()) != '\n' && c != EOF);
+
+        switch (choice) {
+        case 1: {
+            char* input = read_input_windows();
+            if (input && strlen(input) > 0) {
+                uint8_t hash[32];
+
+                printf("输入: \"%s\"\n", input);
+                printf("长度: %zu 字节\n", strlen(input));
+                printf("SM3哈希: ");
+                sm3_hash((uint8_t*)input, strlen(input), hash);
+                print_hash(hash);
+
+                free(input);
+            }
+            else {
+                printf("输入无效或为空。\n");
+            }
+            break;
+        }
+        case 2:
+            printf("程序结束。\n");
+            break;
+        default:
+            printf("无效选择，请重新输入。\n");
+            break;
+        }
+    } while (choice != 2);
+
+    return 0;
+}
