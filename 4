@@ -1,0 +1,364 @@
+#define _CRT_SECURE_NO_WARNINGS
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+
+// 经过验证的SM3哈希算法实现
+
+// SM3上下文结构体
+typedef struct {
+    uint32_t digest[8];      // 哈希中间状态/最终结果
+    uint64_t nblocks;        // 已处理的完整块数
+    unsigned char block[64]; // 当前处理的数据块
+    int num;                 // 当前块中已填充的字节数
+} sm3_ctx_t;
+
+// 循环左移宏定义
+#define ROTL(x, n) (((x) << (n)) | ((x) >> (32 - (n))))
+
+// SM3常量表：前16个为0x79CC4519，后48个为0x7A879D8A
+static const uint32_t T[64] = {
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519, 0x79CC4519,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A,
+    0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A, 0x7A879D8A
+};
+
+// SM3初始值
+static const uint32_t INITIAL_VALUES[8] = {
+    0x7380166F, 0x4914B2B9, 0x172442D7, 0xDA8A0600,
+    0xA96F30BC, 0x163138AA, 0xE38DEE4D, 0xB0FB0E4E
+};
+
+/**
+ * @brief SM3布尔函数FF，根据轮数选择不同的逻辑
+ * @param X 输入变量X
+ * @param Y 输入变量Y
+ * @param Z 输入变量Z
+ * @param j 当前轮数
+ * @return 布尔函数计算结果
+ */
+static uint32_t sm3_ff(uint32_t X, uint32_t Y, uint32_t Z, int j) {
+    // 前16轮使用异或逻辑，后48轮使用多数逻辑
+    return (j < 16) ? (X ^ Y ^ Z) : ((X & Y) | (X & Z) | (Y & Z));
+}
+
+/**
+ * @brief SM3布尔函数GG，根据轮数选择不同的逻辑
+ * @param X 输入变量X
+ * @param Y 输入变量Y
+ * @param Z 输入变量Z
+ * @param j 当前轮数
+ * @return 布尔函数计算结果
+ */
+static uint32_t sm3_gg(uint32_t X, uint32_t Y, uint32_t Z, int j) {
+    // 前16轮使用异或逻辑，后48轮使用条件逻辑
+    return (j < 16) ? (X ^ Y ^ Z) : ((X & Y) | ((~X) & Z));
+}
+
+/**
+ * @brief SM3置换函数P0
+ * @param X 输入值
+ * @return 置换结果
+ */
+static uint32_t sm3_p0(uint32_t X) {
+    return X ^ ROTL(X, 9) ^ ROTL(X, 17);
+}
+
+/**
+ * @brief SM3置换函数P1
+ * @param X 输入值
+ * @return 置换结果
+ */
+static uint32_t sm3_p1(uint32_t X) {
+    return X ^ ROTL(X, 15) ^ ROTL(X, 23);
+}
+
+/**
+ * @brief SM3压缩函数，处理64字节数据块
+ * @param digest 哈希中间状态，同时作为输出
+ * @param block 64字节输入数据块
+ */
+static void sm3_compress(uint32_t digest[8], const unsigned char block[64]) {
+    uint32_t W[68];      // 扩展消息字
+    uint32_t W1[64];     // 用于压缩的扩展消息字
+    uint32_t A, B, C, D, E, F, G, H; // 8个工作变量
+    uint32_t SS1, SS2, TT1, TT2;     // 临时变量
+    int j;
+    
+    // 第一步：消息扩展，将16个字扩展为68个字
+    for (j = 0; j < 16; j++) {
+        // 将4个字节组合成一个32位字，大端序
+        W[j] = ((uint32_t)block[j * 4] << 24) |
+               ((uint32_t)block[j * 4 + 1] << 16) |
+               ((uint32_t)block[j * 4 + 2] << 8) |
+               ((uint32_t)block[j * 4 + 3]);
+    }
+    
+    // 继续扩展剩余的字
+    for (j = 16; j < 68; j++) {
+        W[j] = sm3_p1(W[j - 16] ^ W[j - 9] ^ ROTL(W[j - 3], 15)) ^
+               ROTL(W[j - 13], 7) ^ W[j - 6];
+    }
+    
+    // 生成用于压缩的W'数组
+    for (j = 0; j < 64; j++) {
+        W1[j] = W[j] ^ W[j + 4];
+    }
+    
+    // 第二步：压缩函数，进行64轮迭代
+    A = digest[0];
+    B = digest[1];
+    C = digest[2];
+    D = digest[3];
+    E = digest[4];
+    F = digest[5];
+    G = digest[6];
+    H = digest[7];
+    
+    for (j = 0; j < 64; j++) {
+        // 计算SS1和SS2
+        SS1 = ROTL(ROTL(A, 12) + E + ROTL(T[j], j), 7);
+        SS2 = SS1 ^ ROTL(A, 12);
+        
+        // 计算TT1和TT2
+        TT1 = sm3_ff(A, B, C, j) + D + SS2 + W1[j];
+        TT2 = sm3_gg(E, F, G, j) + H + SS1 + W[j];
+        
+        // 更新工作变量
+        D = C;
+        C = ROTL(B, 9);
+        B = A;
+        A = TT1;
+        H = G;
+        G = ROTL(F, 19);
+        F = E;
+        E = sm3_p0(TT2);
+    }
+    
+    // 第三步：更新哈希中间状态
+    digest[0] ^= A;
+    digest[1] ^= B;
+    digest[2] ^= C;
+    digest[3] ^= D;
+    digest[4] ^= E;
+    digest[5] ^= F;
+    digest[6] ^= G;
+    digest[7] ^= H;
+}
+
+/**
+ * @brief 初始化SM3上下文
+ * @param ctx SM3上下文指针
+ */
+void sm3_init(sm3_ctx_t* ctx) {
+    memcpy(ctx->digest, INITIAL_VALUES, sizeof(INITIAL_VALUES));
+    ctx->nblocks = 0;
+    ctx->num = 0;
+}
+
+/**
+ * @brief 更新SM3哈希计算，处理输入数据
+ * @param ctx SM3上下文指针
+ * @param data 输入数据指针
+ * @param data_len 输入数据长度
+ */
+void sm3_update(sm3_ctx_t* ctx, const unsigned char* data, size_t data_len) {
+    // 如果当前块有部分数据，先填充完整
+    if (ctx->num) {
+        unsigned int left = 64 - ctx->num;
+        if (data_len < left) {
+            memcpy(ctx->block + ctx->num, data, data_len);
+            ctx->num += (int)data_len;
+            return;
+        }
+        else {
+            memcpy(ctx->block + ctx->num, data, left);
+            sm3_compress(ctx->digest, ctx->block);
+            ctx->nblocks++;
+            data += left;
+            data_len -= left;
+        }
+    }
+    
+    // 处理完整的64字节块
+    while (data_len >= 64) {
+        sm3_compress(ctx->digest, data);
+        ctx->nblocks++;
+        data += 64;
+        data_len -= 64;
+    }
+    
+    // 保存剩余的不完整块
+    ctx->num = (int)data_len;
+    if (data_len) {
+        memcpy(ctx->block, data, data_len);
+    }
+}
+
+/**
+ * @brief 完成SM3哈希计算，生成最终哈希值
+ * @param ctx SM3上下文指针
+ * @param digest 输出哈希值缓冲区（至少32字节）
+ */
+void sm3_final(sm3_ctx_t* ctx, unsigned char* digest) {
+    int i;
+    // 计算总位数
+    uint64_t total_bits = (ctx->nblocks << 9) + (ctx->num << 3);
+    
+    // 添加填充位0x80
+    ctx->block[ctx->num] = 0x80;
+    
+    // 处理填充和长度字段
+    if (ctx->num + 9 <= 64) {
+        memset(ctx->block + ctx->num + 1, 0, 64 - ctx->num - 9);
+    }
+    else {
+        memset(ctx->block + ctx->num + 1, 0, 64 - ctx->num - 1);
+        sm3_compress(ctx->digest, ctx->block);
+        memset(ctx->block, 0, 56);
+    }
+    
+    // 在最后8个字节中存储消息长度（大端序）
+    for (i = 0; i < 8; i++) {
+        ctx->block[63 - i] = (unsigned char)((total_bits >> (i * 8)) & 0xFF);
+    }
+    
+    // 处理最后一个块
+    sm3_compress(ctx->digest, ctx->block);
+    
+    // 将哈希值转换为字节数组（大端序）
+    for (i = 0; i < 8; i++) {
+        digest[i * 4] = (unsigned char)((ctx->digest[i] >> 24) & 0xFF);
+        digest[i * 4 + 1] = (unsigned char)((ctx->digest[i] >> 16) & 0xFF);
+        digest[i * 4 + 2] = (unsigned char)((ctx->digest[i] >> 8) & 0xFF);
+        digest[i * 4 + 3] = (unsigned char)(ctx->digest[i] & 0xFF);
+    }
+    
+    // 清理上下文
+    memset(ctx, 0, sizeof(*ctx));
+}
+
+/**
+ * @brief SM3哈希计算的简化接口
+ * @param data 输入数据指针
+ * @param len 输入数据长度
+ * @param digest 输出哈希值缓冲区（至少32字节）
+ */
+void sm3_hash(const unsigned char* data, size_t len, unsigned char* digest) {
+    sm3_ctx_t ctx;
+    sm3_init(&ctx);
+    sm3_update(&ctx, data, len);
+    sm3_final(&ctx, digest);
+}
+
+/**
+ * @brief 以十六进制格式打印哈希值
+ * @param hash 32字节哈希值
+ */
+void print_hash(const unsigned char* hash) {
+    int i;
+    for (i = 0; i < 32; i++) {
+        printf("%02x", hash[i]);
+    }
+}
+
+/**
+ * @brief 主函数：测试SM3哈希算法
+ */
+int main() {
+    printf("=== 经过验证的SM3哈希算法测试 ===\n\n");
+    
+    // 测试用例：输入字符串和预期的SM3哈希值
+    struct {
+        const char* input;          // 输入字符串
+        const char* expected_hash;  // 预期的哈希值
+    } test_cases[] = {
+        {"", "1ab21d8355cfa17f8e61194831e81a8f22bec8c728fefb747ed035eb5082aa2b"},
+        {"abc", "66c7f0f462eeedd9d1f2d46bdc10e4e24167c4875cf2f7a2297da02b8f4ba8e0"},
+        {"abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd",
+         "debe9ff92275b8a138604889c18e5a4d6fdb70e5387e5765293dcba39c0c5732"}
+    };
+    
+    int num_test_cases = sizeof(test_cases) / sizeof(test_cases[0]);
+    
+    // 执行测试用例
+    for (int i = 0; i < num_test_cases; i++) {
+        unsigned char hash[32];
+        printf("测试 %d:\n", i + 1);
+        printf("输入: ");
+        
+        // 根据输入长度显示不同的描述
+        size_t input_len = strlen(test_cases[i].input);
+        if (input_len == 0) {
+            printf("(空字符串)");
+        }
+        else if (input_len == 3) {
+            printf("\"abc\"");
+        }
+        else {
+            printf("\"abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd\"");
+        }
+        printf("\n");
+        
+        printf("长度: %zu 字节\n", input_len);
+        printf("预期: %s\n", test_cases[i].expected_hash);
+        printf("实际: ");
+        
+        // 计算SM3哈希值
+        sm3_hash((unsigned char*)test_cases[i].input, input_len, hash);
+        print_hash(hash);
+        printf("\n");
+        
+        // 验证结果是否正确
+        char actual_hash[65];
+        for (int j = 0; j < 32; j++) {
+            sprintf(actual_hash + j * 2, "%02x", hash[j]);
+        }
+        
+        if (strcmp(actual_hash, test_cases[i].expected_hash) == 0) {
+            printf("测试通过\n");
+        }
+        else {
+            printf("测试失败\n");
+        }
+        printf("\n");
+    }
+    
+    // 交互式测试：允许用户输入字符串计算SM3哈希值
+    printf("=== 交互式测试 ===\n");
+    printf("请输入要计算SM3哈希的字符串 (输入'quit'退出):\n");
+    
+    char input_buffer[1024];
+    while (1) {
+        printf("> ");
+        if (fgets(input_buffer, sizeof(input_buffer), stdin) == NULL) break;
+        
+        // 移除换行符
+        size_t len = strlen(input_buffer);
+        if (len > 0 && input_buffer[len - 1] == '\n') {
+            input_buffer[len - 1] = '\0';
+            len--;
+        }
+        
+        // 检查是否退出
+        if (strcmp(input_buffer, "quit") == 0) break;
+        
+        // 计算并显示哈希值
+        unsigned char hash[32];
+        sm3_hash((unsigned char*)input_buffer, strlen(input_buffer), hash);
+        
+        printf("输入: \"%s\"\n", input_buffer);
+        printf("长度: %zu 字节\n", strlen(input_buffer));
+        printf("SM3哈希: ");
+        print_hash(hash);
+        printf("\n\n");
+    }
+    
+    return 0;
+}
